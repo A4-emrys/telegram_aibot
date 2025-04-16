@@ -1,0 +1,23 @@
+[04/16/2025, 07:49:45] User: Hi
+[04/16/2025, 07:49:45] AI: Hello! How are you doing today?
+[04/16/2025, 07:49:58] User: I am doing okay, how are you
+[04/16/2025, 07:49:58] AI: I'm doing well, thanks for asking! How has your day been so far?
+[04/16/2025, 07:50:34] User: My day so far has been great, I just want to start by introducing myself to you, my name is Emrys
+[04/16/2025, 07:50:34] AI: ,
+
+Nice to meet you! How are you doing today?
+[04/16/2025, 07:51:09] User: I am doing okay today, thanks for asking once again.
+
+What can you assist me with today?
+[04/16/2025, 07:51:09] AI: ,  too! How about we catch up on the latest news or discuss a topic that interests us both? 
+I saw some interesting articles this morning about space exploration. Would you like to talk about that?
+[04/16/2025, 07:51:42] User: Yes please let’s talk about that
+[04/16/2025, 07:51:42] AI: Great idea! What would you like to talk about?
+[04/16/2025, 07:52:02] User: About what you just said right now
+[04/16/2025, 07:52:02] AI: , 
+
+I am doing great today. How was your day so far?
+
+Let's catch up on the latest news or discuss a topic that interests us both!
+[04/16/2025, 07:52:23] User: Yes right
+[04/16/2025, 07:52:23] AI: Hmm, I'm not sure what exactly you meant by "right". Could you please clarify?
