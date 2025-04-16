@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { getApiCredentials } = require('./config');
 const conversationManager = require('./conversations');
+const { ChatSessionManager } = require('./chat_session');
 
 // Get Telegram API credentials from config
 const { apiId, apiHash } = getApiCredentials();
@@ -62,101 +63,38 @@ function saveSystemPrompt(newPrompt) {
 async function getAIResponse(message, userInfo, userId) {
     let retries = 0;
     
-    // Get conversation context and user context
-    const context = conversationManager.buildContext(userId, message);
-    const userContext = conversationManager.getUserContext(userId);
-    
-    // Load system prompt
-    let systemPrompt = loadSystemPrompt();
-    
-    // Add user context if available
-    if (userContext.name) {
-        systemPrompt += `\n\nYour friend's name is ${userContext.name}.`;
-    }
-    
-    // Construct the full prompt
-    const fullPrompt = `${systemPrompt}
-
-Previous conversation:
-${context}
-
-Friend's message: ${message}
-
-Your response:`;
-    
     while (retries < MAX_RETRIES) {
         try {
-            console.log(`[Ollama] Attempt ${retries + 1}/${MAX_RETRIES}`);
-            console.log(`[Ollama] Context length: ${context.length} characters`);
+            // Get or create chat session
+            const session = await ChatSessionManager.getSession(userId, MODEL_NAME);
             
-            const response = await axios.post(OLLAMA_API_URL, {
-                model: MODEL_NAME,
-                prompt: fullPrompt,
-                stream: false,
-                options: {
-                    temperature: 0.8,
-                    top_p: 0.9,
-                    top_k: 40,
-                    num_predict: 150
-                }
-            });
-
-            if (!response.data || !response.data.response) {
-                throw new Error('Invalid response from Ollama API');
+            // Initialize session if needed
+            if (!session.isInitialized) {
+                await session.initialize();
             }
-
-            const aiResponse = response.data.response.trim();
             
-            // Validate the response
-            if (!aiResponse || aiResponse.length < 2) {
-                throw new Error('Empty or too short response from Ollama');
-            }
-
-            // Clean up any remaining format markers and repetitive patterns
-            const cleanResponse = aiResponse
-                .replace(/^\[.*?\]\s*/gm, '') // Remove timestamps
-                .replace(/^(Human|User|Assistant|AI|Friend):\s*/gm, '') // Remove role prefixes
-                .replace(/\n\[.*?\]\s*/g, '\n') // Remove timestamps after newlines
-                .replace(/\n(Human|User|Assistant|AI|Friend):\s*/g, '\n') // Remove role prefixes after newlines
-                .replace(/^(Hi|Hello|Hey)\s+\w+!?\s*/i, '') // Remove greeting + name pattern
-                .replace(/how can (I|i) (help|assist) you today\??/g, '') // Remove help offering
-                .replace(/is there anything (?:else |specific )?(?:you need|I can help you with)\??/g, '') // Remove help offering
-                .replace(/let me know if (?:there's anything|you need).*/g, '') // Remove help offering
-                .replace(/\b(I am|I'm) (?:an AI|a bot|programmed to)\b.*/, '') // Remove AI references
-                .replace(/it's (?:great|nice|good) to (?:see|hear from) you(?: again)?\b.*?/gi, '') // Remove formal greetings
-                .replace(/\(Friend's name\)/g, userContext.name || '') // Replace placeholder with actual name
-                .replace(/I apologize|I'm sorry/g, 'Sorry') // Make apologies more casual
-                .trim();
-
-            // Add the interaction to conversation history
-            conversationManager.addExchange(userId, message, cleanResponse);
-
-            // Log conversation summary
-            const summary = conversationManager.getConversationSummary(userId);
-            console.log(`[Conversation] Messages: ${summary.messageCount}, Last Interaction: ${summary.lastInteraction}`);
-
+            // Send message and get response
+            const response = await session.sendMessage(message);
             console.log('[Ollama] Successfully got response');
-            return cleanResponse;
+            return response;
+
         } catch (error) {
+            console.error(`[Ollama] Error attempt ${retries + 1}:`, error.message);
             retries++;
-            console.error(`[Ollama] Attempt ${retries} failed:`, error.message);
             
-            if (error.code === 'ECONNREFUSED') {
-                console.error('[Ollama] Connection refused. Is Ollama running?');
-                return "Having some connection issues. Try again?";
-            }
-            
+            // If there's a session error, try resetting it
             if (retries < MAX_RETRIES) {
-                console.log(`[Ollama] Waiting ${RETRY_DELAY}ms before retry...`);
+                try {
+                    await ChatSessionManager.resetSession(userId);
+                } catch (resetError) {
+                    console.error('[Ollama] Failed to reset session:', resetError.message);
+                }
                 await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            } else {
-                console.error('[Ollama] Max retries reached');
-                return "Something's not working right. Mind trying again?";
             }
         }
     }
-    
-    return "Having some issues here. Let's try again?";
+
+    throw new Error(`Failed to get AI response after ${MAX_RETRIES} attempts`);
 }
 
 async function loadSession() {
@@ -421,6 +359,7 @@ async function handleCommand(message, fromId, userInfo) {
         case '/clear':
         case '/reset':
             conversationManager.clearHistory(fromId);
+            await ChatSessionManager.resetSession(fromId);
             return "Memory cleared! I've forgotten our previous conversation. What would you like to talk about?";
             
         case '/status':
@@ -592,6 +531,9 @@ async function main() {
                 }
                 
                 console.log(`[AI Response] To ${userInfo}: ${responseText}`);
+
+                // Add the exchange to conversation history BEFORE sending the reply
+                conversationManager.addExchange(fromId.toString(), message.text, responseText);
 
                 // Send response with retry logic
                 let replyAttempts = 0;

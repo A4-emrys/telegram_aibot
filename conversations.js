@@ -4,6 +4,7 @@ const path = require('path');
 // Configuration
 const CONVERSATIONS_DIR = '.conversations';
 const MAX_CONTEXT_LENGTH = 8000;
+const MAX_RECENT_MESSAGES = 10;
 const DATE_FORMAT_OPTIONS = {
     year: 'numeric',
     month: '2-digit',
@@ -17,7 +18,7 @@ const DATE_FORMAT_OPTIONS = {
 class ConversationManager {
     constructor() {
         this.initializeStorage();
-        this.userContext = new Map(); // Store user-specific context
+        this.userContext = new Map();
     }
 
     initializeStorage() {
@@ -39,31 +40,21 @@ class ConversationManager {
         return date.toLocaleString('en-US', DATE_FORMAT_OPTIONS);
     }
 
-    // Update user context (like their name, preferences, etc.)
+    // Enhanced context management
     updateUserContext(userId, message, aiResponse) {
         const contextPath = this.getContextPath(userId);
-        let context = {};
+        let context = this.getUserContext(userId);
 
-        // Try to load existing context
-        try {
-            if (fs.existsSync(contextPath)) {
-                context = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
-            }
-        } catch (error) {
-            console.error(`[Context] Error loading context for user ${userId}:`, error);
-        }
+        // Update basic info
+        context.lastInteraction = new Date().toISOString();
+        context.messageCount = (context.messageCount || 0) + 1;
 
-        // Update name if found in conversation
+        // Extract and update name if found
         const nameMatches = [
-            // Match "my name is [name]" pattern
             ...message.matchAll(/my name is (\w+)/gi),
-            // Match "I'm [name]" pattern
             ...message.matchAll(/I['']m (\w+)/gi),
-            // Match "call me [name]" pattern
             ...message.matchAll(/call me (\w+)/gi),
-            // Match "name's [name]" pattern
             ...message.matchAll(/name['']s (\w+)/gi),
-            // Match direct name statements
             ...message.matchAll(/^(\w+), that['']s my name$/gi)
         ];
 
@@ -71,6 +62,25 @@ class ConversationManager {
             const name = nameMatches[nameMatches.length - 1][1];
             context.name = name;
             console.log(`[Context] Updated name for user ${userId} to: ${name}`);
+        }
+
+        // Extract and track topics
+        context.topics = context.topics || [];
+        const newTopic = this.extractMainTopic(message);
+        if (newTopic) {
+            context.topics.push(newTopic);
+            context.lastTopic = newTopic;
+        }
+
+        // Track personal information
+        const ageMatch = message.match(/(?:I am|I'm)\s+(\d+)\s+years?\s+old/i);
+        if (ageMatch) {
+            context.age = parseInt(ageMatch[1]);
+        }
+
+        const locationMatch = message.match(/(?:I (?:live|am from|reside) in|from) ([^,.!?]+)/i);
+        if (locationMatch) {
+            context.location = locationMatch[1].trim();
         }
 
         // Save context
@@ -83,7 +93,12 @@ class ConversationManager {
         return context;
     }
 
-    // Get user context
+    extractMainTopic(message) {
+        // Simple topic extraction based on key nouns and verbs
+        const topics = message.match(/\b(?:about|discussing|talking about|regarding) ([^,.!?]+)/i);
+        return topics ? topics[1].trim() : null;
+    }
+
     getUserContext(userId) {
         const contextPath = this.getContextPath(userId);
         try {
@@ -111,104 +126,96 @@ class ConversationManager {
 
     addExchange(userId, userMessage, aiResponse) {
         this.appendMessage(userId, 'User', userMessage);
-        this.appendMessage(userId, 'AI', aiResponse);
+        
+        // Validate and clean AI response before saving
+        const cleanedResponse = this.validateResponse(aiResponse, this.getUserContext(userId));
+        this.appendMessage(userId, 'AI', cleanedResponse);
         
         // Update context based on the exchange
-        this.updateUserContext(userId, userMessage, aiResponse);
+        this.updateUserContext(userId, userMessage, cleanedResponse);
+    }
+
+    validateResponse(response, context) {
+        // Remove any leaked system instructions or formatting
+        let cleanedResponse = response
+            .replace(/You are an AI assistant.*?(?=\n|$)/gi, '')
+            .replace(/You (always )?address users as.*?(?=\n|$)/gi, '')
+            .replace(/\b(AI|assistant|model|language model)\b/gi, '')
+            .replace(/\[.*?\]/g, '')
+            .replace(/^(Human|User|Assistant|AI|Friend):/gm, '')
+            .replace(/Previous response:\s*/g, '')
+            .trim();
+
+        // Ensure proper name usage if available
+        if (context.name && !cleanedResponse.includes(context.name)) {
+            // Only add name if response doesn't already have a personal reference
+            if (!cleanedResponse.match(/\b(you|your)\b/i)) {
+                cleanedResponse = `${context.name}, ${cleanedResponse}`;
+            }
+        }
+
+        // Remove duplicate responses
+        const sentences = cleanedResponse.split(/[.!?]+\s+/);
+        const uniqueSentences = [...new Set(sentences)];
+        cleanedResponse = uniqueSentences.join('. ').trim();
+
+        // Ensure the response ends with proper punctuation
+        if (!cleanedResponse.match(/[.!?]$/)) {
+            cleanedResponse += '.';
+        }
+
+        return cleanedResponse;
     }
 
     buildContext(userId, currentMessage = null) {
-        const filePath = this.getConversationPath(userId);
-        const userContext = this.getUserContext(userId);
-        
-        let contextParts = [];
+        const context = {
+            systemPrompt: null, // Will be filled by the caller
+            userContext: this.getUserContext(userId),
+            recentMessages: this.getRecentMessages(userId),
+            currentMessage
+        };
+
+        // Format context string
+        let contextString = '';
 
         // Add user context if available
-        if (userContext.name) {
-            contextParts.push(`The user's name is ${userContext.name}. Always remember to use their name when appropriate.`);
+        if (context.userContext.name) {
+            contextString += `The user's name is ${context.userContext.name}. `;
+        }
+        if (context.userContext.age) {
+            contextString += `They are ${context.userContext.age} years old. `;
+        }
+        if (context.userContext.location) {
+            contextString += `They live in ${context.userContext.location}. `;
         }
 
+        // Add recent messages
+        if (context.recentMessages.length > 0) {
+            contextString += '\n\nRecent conversation:\n';
+            contextString += context.recentMessages.join('\n');
+        }
+
+        // Add current message if provided
+        if (currentMessage) {
+            contextString += `\n\nCurrent message: ${currentMessage}`;
+        }
+
+        return contextString;
+    }
+
+    getRecentMessages(userId, limit = MAX_RECENT_MESSAGES) {
+        const filePath = this.getConversationPath(userId);
         if (!fs.existsSync(filePath)) {
-            return contextParts.join('\n') + (currentMessage ? `\n${currentMessage}` : '');
+            return [];
         }
 
         try {
-            // Read the entire conversation
-            let conversation = fs.readFileSync(filePath, 'utf8');
-            let messages = conversation.split('\n').filter(line => line.trim());
-
-            // Extract messages without timestamps and organize by exchange
-            let exchanges = [];
-            let currentExchange = { user: null, ai: null };
-
-            messages.forEach(line => {
-                const match = line.match(/\[.*?\] (User|AI): (.+)/);
-                if (match) {
-                    const [_, role, content] = match;
-                    if (role === 'User') {
-                        if (currentExchange.user !== null) {
-                            exchanges.push({...currentExchange});
-                            currentExchange = { user: null, ai: null };
-                        }
-                        currentExchange.user = content;
-                    } else if (role === 'AI') {
-                        currentExchange.ai = content;
-                        if (currentExchange.user !== null) {
-                            exchanges.push({...currentExchange});
-                            currentExchange = { user: null, ai: null };
-                        }
-                    }
-                }
-            });
-
-            // If we have a partial exchange, add it
-            if (currentExchange.user || currentExchange.ai) {
-                exchanges.push(currentExchange);
-            }
-
-            // If within length limit, use all exchanges
-            const exchangeStrings = exchanges.map(ex => {
-                let parts = [];
-                if (ex.user) parts.push(`User: ${ex.user}`);
-                if (ex.ai) parts.push(`Previous response: ${ex.ai}`);
-                return parts.join('\n');
-            });
-
-            if (conversation.length <= MAX_CONTEXT_LENGTH) {
-                contextParts.push(...exchangeStrings);
-                return contextParts.join('\n\n') + '\n';
-            }
-
-            // If too long, use smart truncation
-            // Always include the last 3 exchanges
-            const lastExchanges = exchangeStrings.slice(-3);
-            const remainingExchanges = exchangeStrings.slice(0, -3);
-            
-            // Calculate remaining space
-            const essentialContent = lastExchanges.join('\n\n');
-            const essentialLength = essentialContent.length + contextParts[0]?.length || 0;
-            const remainingSpace = MAX_CONTEXT_LENGTH - essentialLength;
-
-            if (remainingSpace > 100) {
-                let currentLength = 0;
-                let additionalExchanges = [];
-                
-                for (let i = remainingExchanges.length - 1; i >= 0; i--) {
-                    const exchange = remainingExchanges[i];
-                    if (currentLength + exchange.length > remainingSpace) break;
-                    additionalExchanges.unshift(exchange);
-                    currentLength += exchange.length + 2; // +2 for '\n\n'
-                }
-
-                contextParts.push(...additionalExchanges);
-            }
-
-            contextParts.push(...lastExchanges);
-            return contextParts.join('\n\n') + '\n';
-
+            const content = fs.readFileSync(filePath, 'utf8');
+            const messages = content.split('\n').filter(line => line.trim());
+            return messages.slice(-limit);
         } catch (error) {
-            console.error(`[Storage] Error building context for user ${userId}:`, error);
-            return contextParts.join('\n') + (currentMessage ? `\n${currentMessage}` : '');
+            console.error(`[Storage] Error reading messages for user ${userId}:`, error);
+            return [];
         }
     }
 
@@ -237,8 +244,10 @@ class ConversationManager {
             if (!fs.existsSync(filePath)) {
                 return {
                     messageCount: 0,
+                    totalExchanges: 0,
                     lastInteraction: null,
-                    fileSize: 0
+                    fileSize: 0,
+                    contextLength: 0
                 };
             }
 
@@ -248,17 +257,28 @@ class ConversationManager {
             const lastMessage = messages[messages.length - 1];
             const lastInteractionMatch = lastMessage ? lastMessage.match(/\[(.*?)\]/) : null;
 
+            // Count actual exchanges (pairs of user and AI messages)
+            const totalExchanges = Math.floor(messages.length / 2);
+
+            // Get the current context length
+            const context = this.buildContext(userId);
+            const contextLength = context ? context.length : 0;
+
             return {
                 messageCount: messages.length,
+                totalExchanges: totalExchanges,
                 lastInteraction: lastInteractionMatch ? new Date(lastInteractionMatch[1]) : null,
-                fileSize: stats.size
+                fileSize: stats.size,
+                contextLength: contextLength
             };
         } catch (error) {
             console.error(`[Storage] Error getting summary for user ${userId}:`, error);
             return {
                 messageCount: 0,
+                totalExchanges: 0,
                 lastInteraction: null,
-                fileSize: 0
+                fileSize: 0,
+                contextLength: 0
             };
         }
     }
